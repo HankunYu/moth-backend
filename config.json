@@ -1,0 +1,40 @@
+{
+    "monitoring": {
+        "watch_directory": "./example",
+        "texture_path_pattern": "./mothtexture/generated_textures_000_2000.png",
+        "scan_interval": 1.0
+    },
+    "udp_client": {
+        "host": "127.0.0.1",
+        "send_port": 8889,
+        "receive_port": 8888,
+        "buffer_size": 1024,
+        "timeout": 5.0
+    },
+    "moth_settings": {
+        "min_moths": 5,
+        "max_moths": 200,
+        "base_lifespan_seconds": 300,
+        "min_lifespan_seconds": 60,
+        "max_lifespan_seconds": 1800,
+        "lifespan_adjustment_factor": 1.2,
+        "breeding_cooldown": 30,
+        "breeding_output_dir": "./offspring_textures/",
+        "mask_resolution": [20, 20],
+        "population_size": 15,
+        "generations": 30,
+        "mutation_rate": 0.15,
+        "lifecycle_check_interval": 15
+    },
+    "ollama": {
+        "enabled": true,
+        "host": "http://localhost:11434",
+        "model": "deepseek-r1:1.5b",
+        "timeout": 30,
+        "prompt_template": "帮我融合两个句子成一句话,要求语义通顺,不要使用关联词关联两句话,而是将他们的内容混杂在一起. 只回复我句子内容不带其他任何东西.句子1: {prompt1} 句子2: {prompt2}"
+    },
+    "logging": {
+        "level": "INFO",
+        "log_file": "moth_controller.log"
+    }
+}

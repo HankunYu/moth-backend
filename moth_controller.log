@@ -1,0 +1,28 @@
+2025-06-25 06:04:13,901 - __main__ - INFO - Moth Controller initialized
+2025-06-25 06:04:13,902 - __main__ - INFO - Starting directory monitoring: example
+2025-06-25 06:04:13,902 - __main__ - INFO - Moth Controller started
+2025-06-25 06:04:13,902 - __main__ - INFO - New directory detected: example/20250608_160443
+2025-06-25 06:04:13,902 - __main__ - INFO - Created new moth: a95f636d-87bf-4c65-9dda-8f4cb6c51a72 with texture: example/20250608_160443/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:04:13,902 - __main__ - INFO - New directory detected: example/20250608_155825
+2025-06-25 06:04:13,902 - __main__ - INFO - Created new moth: 8522a12c-2657-4135-b35a-1f3b3605ca78 with texture: example/20250608_155825/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:04:13,902 - __main__ - INFO - New directory detected: example/20250608_163755
+2025-06-25 06:04:13,902 - __main__ - INFO - Created new moth: 33e6cd42-3d77-4d33-b572-8a715bf81d6b with texture: example/20250608_163755/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:04:13,902 - __main__ - INFO - New directory detected: example/20250608_161752
+2025-06-25 06:04:13,902 - __main__ - INFO - Created new moth: 55292f37-fcda-47c0-ad6d-340d286c9ca0 with texture: example/20250608_161752/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:04:13,902 - __main__ - INFO - New directory detected: example/20250608_164954
+2025-06-25 06:04:13,902 - __main__ - INFO - Created new moth: 95898c94-26ae-49c3-8f3f-b19a21acc8d0 with texture: example/20250608_164954/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:04:38,907 - __main__ - INFO - Moth Controller stopped
+2025-06-25 06:29:47,101 - __main__ - INFO - Moth Controller initialized
+2025-06-25 06:29:47,102 - __main__ - INFO - Starting directory monitoring: example
+2025-06-25 06:29:47,102 - __main__ - INFO - Moth Controller started
+2025-06-25 06:29:47,102 - __main__ - INFO - New directory detected: example/20250608_161752
+2025-06-25 06:29:47,102 - __main__ - INFO - Created new moth: 021455cd-6063-4077-8d10-8d011336a720 with texture: example/20250608_161752/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:29:47,102 - __main__ - INFO - New directory detected: example/20250608_160443
+2025-06-25 06:29:47,103 - __main__ - INFO - Created new moth: b4e6f4af-da53-4ff6-93bd-16baeebb25de with texture: example/20250608_160443/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:29:47,103 - __main__ - INFO - New directory detected: example/20250608_163755
+2025-06-25 06:29:47,103 - __main__ - INFO - Created new moth: a93b5972-c231-4edc-9cd7-2aea78996ee7 with texture: example/20250608_163755/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:29:47,103 - __main__ - INFO - New directory detected: example/20250608_164954
+2025-06-25 06:29:47,103 - __main__ - INFO - Created new moth: 5e148f78-6f0d-4413-8679-b4696368781a with texture: example/20250608_164954/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:29:47,103 - __main__ - INFO - New directory detected: example/20250608_155825
+2025-06-25 06:29:47,103 - __main__ - INFO - Created new moth: 3e2fe11f-2496-4760-8af3-62e0b15be2d5 with texture: example/20250608_155825/./mothtexture/generated_textures_000_2000.png
+2025-06-25 06:30:20,561 - __main__ - INFO - Moth Controller stopped
