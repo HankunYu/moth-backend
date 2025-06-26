@@ -5,6 +5,8 @@ import uuid
 import logging
 import threading
 import requests
+import random
+import re
 from pathlib import Path
 from typing import Dict, Set
 from dataclasses import dataclass
@@ -22,8 +24,9 @@ class MothInfo:
     is_alive: bool = True
     has_mated: bool = False
     is_dead: bool = False
-    mate_id: str = None
-    mating_time: float = None
+    mate_history: list = None  # List of mate_ids
+    last_mating_time: float = None
+    breeding_count: int = 0
     current_lifespan: float = None  # Dynamic lifespan for this moth
     lifespan_extensions: int = 0    # How many times lifespan was extended
 
@@ -49,6 +52,7 @@ class MothController:
         self.is_running = False
         self.monitor_thread = None
         self.lifecycle_thread = None
+        self.breeding_thread = None
         
         # Create directories
         self.breeding_output_dir = self.config["moth_settings"]["breeding_output_dir"]
@@ -65,6 +69,14 @@ class MothController:
         self.max_lifespan = self.config["moth_settings"]["max_lifespan_seconds"]
         self.lifespan_adjustment_factor = self.config["moth_settings"]["lifespan_adjustment_factor"]
         
+        # Auto breeding settings
+        self.auto_breeding_enabled = self.config["moth_settings"]["auto_breeding_enabled"]
+        self.breeding_check_interval = self.config["moth_settings"]["breeding_check_interval"]
+        self.min_breeding_interval = self.config["moth_settings"]["min_breeding_interval"]
+        self.max_breeding_interval = self.config["moth_settings"]["max_breeding_interval"]
+        self.min_remaining_lifespan_for_breeding = self.config["moth_settings"]["min_remaining_lifespan_for_breeding"]
+        self.allow_multiple_breeding = self.config["moth_settings"]["allow_multiple_breeding"]
+        
         # Ollama settings
         self.ollama_enabled = self.config["ollama"]["enabled"]
         self.ollama_host = self.config["ollama"]["host"]
@@ -72,12 +84,15 @@ class MothController:
         self.ollama_timeout = self.config["ollama"]["timeout"]
         self.ollama_prompt_template = self.config["ollama"]["prompt_template"]
         
+        # Perform startup self-check
+        self._perform_startup_selfcheck()
+        
         self.logger.info("Moth Controller initialized")
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file"""
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
             self.logger.error(f"Config file not found: {config_path}")
@@ -101,18 +116,115 @@ class MothController:
         )
         self.logger = logging.getLogger(__name__)
     
+    def _perform_startup_selfcheck(self):
+        """Perform startup self-check including Ollama connectivity test"""
+        self.logger.info("Performing startup self-check...")
+        
+        # Test Ollama connectivity if enabled
+        if self.ollama_enabled:
+            self.logger.info("Testing Ollama connectivity...")
+            if not self._test_ollama_connection():
+                self.logger.error("Ollama connectivity test failed! Disabling Ollama...")
+                self.ollama_enabled = False
+            else:
+                self.logger.info("Ollama connectivity test passed")
+        else:
+            self.logger.info("Ollama is disabled, skipping connectivity test")
+        
+        # Test UDP client can be created
+        try:
+            test_message = "test"
+            self.logger.info("UDP client configuration validated")
+        except Exception as e:
+            self.logger.error(f"UDP client configuration error: {e}")
+            raise
+        
+        # Check directories
+        if not os.path.exists(self.breeding_output_dir):
+            os.makedirs(self.breeding_output_dir, exist_ok=True)
+            self.logger.info(f"Created breeding output directory: {self.breeding_output_dir}")
+        
+        self.logger.info("Startup self-check completed")
+    
+    def _test_ollama_connection(self) -> bool:
+        """Test Ollama API connectivity and model availability"""
+        try:
+            # Test basic API connectivity
+            response = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
+            if response.status_code != 200:
+                self.logger.error(f"Ollama API not responding: {response.status_code}")
+                return False
+            
+            # Check if specified model is available
+            models = response.json().get("models", [])
+            model_names = [model.get("name", "") for model in models]
+            
+            if self.ollama_model not in model_names:
+                self.logger.error(f"Model '{self.ollama_model}' not found in Ollama. Available models: {model_names}")
+                return False
+            
+            # Test a simple generation request
+            test_payload = {
+                "model": self.ollama_model,
+                "prompt": "Test prompt",
+                "stream": False
+            }
+            
+            response = requests.post(
+                f"{self.ollama_host}/api/generate",
+                json=test_payload,
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                self.logger.error(f"Ollama generation test failed: {response.status_code} - {response.text}")
+                return False
+            
+            result = response.json()
+            if not result.get("response"):
+                self.logger.error("Ollama returned empty response in test")
+                return False
+            
+            return True
+            
+        except requests.exceptions.Timeout:
+            self.logger.error("Ollama connection timeout")
+            return False
+        except requests.exceptions.ConnectionError:
+            self.logger.error(f"Cannot connect to Ollama at {self.ollama_host}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Ollama connectivity test error: {e}")
+            return False
+    
+    def _clean_prompt_content(self, prompt: str) -> str:
+        """Remove <think></think> tags and their content from prompt"""
+        # Remove <think></think> blocks (case insensitive, multiline)
+        cleaned = re.sub(r'<think>.*?</think>', '', prompt, flags=re.IGNORECASE | re.DOTALL)
+        # Clean up extra whitespace
+        cleaned = ' '.join(cleaned.split())
+        return cleaned.strip()
+    
+    def _ensure_absolute_path(self, path: str) -> str:
+        """Convert relative path to absolute path if needed"""
+        if not os.path.isabs(path):
+            absolute_path = os.path.abspath(path)
+            self.logger.info(f"Converted relative path to absolute: {path} -> {absolute_path}")
+            return absolute_path
+        return path
+    
     def _handle_udp_message(self, message: str):
         """Handle incoming UDP messages"""
         self.logger.info(f"Received UDP message: {message}")
         
         if message.startswith("Generated moth:"):
             moth_id = message.split(":")[1].strip()
-            self.logger.info(f"✓ Moth generation confirmed: {moth_id}")
+            self.logger.info(f"Moth generation confirmed: {moth_id}")
         elif message.startswith("Killed moth:"):
             moth_id = message.split(":")[1].strip()
             if moth_id in self.moths:
                 self.moths[moth_id].is_alive = False
-            self.logger.info(f"✓ Moth kill confirmed: {moth_id}")
+            self.logger.info(f"Moth kill confirmed: {moth_id}")
     
     def start(self):
         """Start the moth controller"""
@@ -130,6 +242,11 @@ class MothController:
         self.lifecycle_thread = threading.Thread(target=self._manage_lifecycle, daemon=True)
         self.lifecycle_thread.start()
         
+        # Start auto breeding thread if enabled
+        if self.auto_breeding_enabled:
+            self.breeding_thread = threading.Thread(target=self._manage_auto_breeding, daemon=True)
+            self.breeding_thread.start()
+        
         self.logger.info("Moth Controller started")
         return True
     
@@ -142,6 +259,9 @@ class MothController:
     def _monitor_directories(self):
         """Monitor directories for new subdirectories"""
         watch_dir = Path(self.config["monitoring"]["watch_directory"])
+        if not watch_dir.is_absolute():
+            watch_dir = watch_dir.resolve()
+            self.logger.info(f"Converted relative watch_directory to absolute path: {watch_dir}")
         scan_interval = self.config["monitoring"]["scan_interval"]
         
         self.logger.info(f"Starting directory monitoring: {watch_dir}")
@@ -152,7 +272,9 @@ class MothController:
                     current_dirs = {str(d) for d in watch_dir.iterdir() if d.is_dir()}
                     new_dirs = current_dirs - self.monitored_directories
                     
-                    for new_dir in new_dirs:
+                    for i, new_dir in enumerate(new_dirs):
+                        if i > 0:  # Add 1 second cooldown between generations (except for first one)
+                            time.sleep(1)
                         self._process_new_directory(new_dir)
                         self.monitored_directories.add(new_dir)
                 
@@ -185,10 +307,12 @@ class MothController:
         """Read prompt text from prompt.txt file"""
         try:
             if os.path.exists(prompt_path):
-                with open(prompt_path, 'r', encoding='utf-8') as f:
+                with open(prompt_path, 'r') as f:
                     prompt_text = f.read().strip()
-                self.logger.info(f"Read prompt from {prompt_path}: {prompt_text[:50]}...")
-                return prompt_text
+                # Clean prompt content before returning
+                cleaned_prompt = self._clean_prompt_content(prompt_text)
+                self.logger.info(f"Read prompt from {prompt_path}: {cleaned_prompt[:50]}...")
+                return cleaned_prompt
             else:
                 self.logger.warning(f"Prompt file not found: {prompt_path}")
                 return ""
@@ -200,7 +324,8 @@ class MothController:
         """Use Ollama to merge two prompts into one coherent prompt"""
         if not self.ollama_enabled:
             # Fallback to simple concatenation if Ollama is disabled
-            return f"Offspring of: [{prompt1}] + [{prompt2}]"
+            fallback_prompt = f"Offspring of: [{prompt1}] + [{prompt2}]"
+            return self._clean_prompt_content(fallback_prompt)
         
         try:
             # Format the prompt using the template
@@ -228,8 +353,10 @@ class MothController:
                 merged_prompt = result.get("response", "").strip()
                 
                 if merged_prompt:
-                    self.logger.info(f"Ollama merged prompts: '{prompt1}' + '{prompt2}' -> '{merged_prompt}'")
-                    return merged_prompt
+                    # Remove <think></think> content from the merged prompt
+                    cleaned_prompt = self._clean_prompt_content(merged_prompt)
+                    self.logger.info(f"Ollama merged prompts: '{prompt1}' + '{prompt2}' -> '{cleaned_prompt}'")
+                    return cleaned_prompt
                 else:
                     self.logger.warning("Ollama returned empty response")
                     
@@ -245,8 +372,10 @@ class MothController:
         
         # Fallback to simple concatenation if Ollama fails
         fallback_prompt = f"Offspring of: [{prompt1}] + [{prompt2}]"
-        self.logger.info(f"Using fallback prompt: {fallback_prompt}")
-        return fallback_prompt
+        # Clean the fallback prompt as well
+        cleaned_fallback = self._clean_prompt_content(fallback_prompt)
+        self.logger.info(f"Using fallback prompt: {cleaned_fallback}")
+        return cleaned_fallback
     
     def _create_moth_from_texture(self, directory: str, texture_path: str, prompt: str = ""):
         """Create a new moth from texture file"""
@@ -267,8 +396,12 @@ class MothController:
             current_lifespan=self.base_lifespan
         )
         
+        # Ensure texture path is absolute
+        abs_texture_path = self._ensure_absolute_path(texture_path)
+        
         # Send generation command with prompt
-        success = self.udp_client.generate_new_moth(moth_id, texture_path, prompt)
+        print(f"Creating new moth: {moth_id} with texture: {abs_texture_path}")
+        success = self.udp_client.generate_new_moth(moth_id, abs_texture_path, prompt)
         
         if success:
             self.moths[moth_id] = moth_info
@@ -312,6 +445,68 @@ class MothController:
             except Exception as e:
                 self.logger.error(f"Error managing lifecycle: {e}")
                 time.sleep(self.lifecycle_check_interval)
+    
+    def _manage_auto_breeding(self):
+        """Manage automatic breeding between suitable moths"""
+        while self.is_running:
+            try:
+                current_time = time.time()
+                
+                # Get eligible moths for breeding
+                eligible_moths = self._get_eligible_moths_for_breeding(current_time)
+                
+                if len(eligible_moths) >= 2:
+                    # Randomly select two moths for breeding
+                    moth1, moth2 = random.sample(eligible_moths, 2)
+                    
+                    self.logger.info(f"Auto breeding attempt: {moth1.moth_id[:8]} + {moth2.moth_id[:8]}")
+                    success = self.mate_moths(moth1.moth_id, moth2.moth_id)
+                    
+                    if success:
+                        self.logger.info(f"Auto breeding successful: {moth1.moth_id[:8]} + {moth2.moth_id[:8]}")
+                    else:
+                        self.logger.warning(f"Auto breeding failed: {moth1.moth_id[:8]} + {moth2.moth_id[:8]}")
+                
+                # Wait for next breeding check with some randomness
+                sleep_time = random.uniform(
+                    self.breeding_check_interval * 0.8,
+                    self.breeding_check_interval * 1.2
+                )
+                time.sleep(sleep_time)
+                
+            except Exception as e:
+                self.logger.error(f"Error managing auto breeding: {e}")
+                time.sleep(self.breeding_check_interval)
+    
+    def _get_eligible_moths_for_breeding(self, current_time: float) -> list:
+        """Get list of moths eligible for breeding"""
+        eligible_moths = []
+        
+        for moth in self.moths.values():
+            if not moth.is_alive:
+                continue
+                
+            # Check if moth has enough remaining lifespan
+            age = current_time - moth.birth_time
+            remaining_lifespan = moth.current_lifespan - age
+            
+            if remaining_lifespan < self.min_remaining_lifespan_for_breeding:
+                continue
+            
+            # Check breeding cooldown
+            if moth.last_mating_time is not None:
+                time_since_last_mating = current_time - moth.last_mating_time
+                breeding_interval = random.uniform(
+                    self.min_breeding_interval,
+                    self.max_breeding_interval
+                )
+                
+                if time_since_last_mating < breeding_interval:
+                    continue
+            
+            eligible_moths.append(moth)
+        
+        return eligible_moths
     
     def _kill_moth(self, moth_id: str, reason: str = "manual"):
         """Kill a moth"""
@@ -392,7 +587,7 @@ class MothController:
             self.logger.warning(f"One or both moths are dead: {moth_id1}, {moth_id2}")
             return False
         
-        if moth1.has_mated or moth2.has_mated:
+        if not self.allow_multiple_breeding and (moth1.has_mated or moth2.has_mated):
             self.logger.warning(f"One or both moths have already mated: {moth_id1}, {moth_id2}")
             return False
         
@@ -401,11 +596,18 @@ class MothController:
         if success:
             current_time = time.time()
             moth1.has_mated = True
-            moth1.mate_id = moth_id2
-            moth1.mating_time = current_time
+            moth1.last_mating_time = current_time
+            moth1.breeding_count += 1
+            if moth1.mate_history is None:
+                moth1.mate_history = []
+            moth1.mate_history.append(moth_id2)
+            
             moth2.has_mated = True
-            moth2.mate_id = moth_id1
-            moth2.mating_time = current_time
+            moth2.last_mating_time = current_time
+            moth2.breeding_count += 1
+            if moth2.mate_history is None:
+                moth2.mate_history = []
+            moth2.mate_history.append(moth_id1)
             self.logger.info(f"Moths mated successfully: {moth_id1} + {moth_id2}")
             
             # Generate offspring texture using genetic algorithm
@@ -482,8 +684,11 @@ class MothController:
             current_lifespan=self.base_lifespan
         )
         
+        # Ensure offspring texture path is absolute
+        abs_offspring_texture = self._ensure_absolute_path(offspring_texture)
+        
         # Send birth command (for offspring moths) with prompt
-        success = self.udp_client.birth_moth(offspring_moth_id, offspring_texture, offspring_prompt)
+        success = self.udp_client.birth_moth(offspring_moth_id, abs_offspring_texture, offspring_prompt)
         
         if success:
             self.moths[offspring_moth_id] = offspring_info
@@ -532,8 +737,9 @@ class MothController:
                 "is_alive": moth_info.is_alive,
                 "is_dead": moth_info.is_dead,
                 "has_mated": moth_info.has_mated,
-                "mate_id": moth_info.mate_id,
-                "mating_time": moth_info.mating_time,
+                "mate_history": moth_info.mate_history or [],
+                "last_mating_time": moth_info.last_mating_time,
+                "breeding_count": moth_info.breeding_count,
                 "current_lifespan": moth_info.current_lifespan,
                 "remaining_lifespan": round(remaining_lifespan, 2),
                 "lifespan_extensions": moth_info.lifespan_extensions
