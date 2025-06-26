@@ -16,6 +16,13 @@ from mask import GeneticMaskBlender
 import cv2
 
 @dataclass
+class MothEvent:
+    timestamp: float
+    event_type: str  # "birth", "death", "mating", "lifespan_extension"
+    moth_id: str
+    details: dict = None  # Additional event details
+
+@dataclass
 class MothInfo:
     moth_id: str
     texture_path: str
@@ -30,6 +37,8 @@ class MothInfo:
     breeding_count: int = 0
     current_lifespan: float = None  # Dynamic lifespan for this moth
     lifespan_extensions: int = 0    # How many times lifespan was extended
+    death_time: float = None  # Time when moth died
+    death_reason: str = None  # Reason for death
 
 class MothController:
     def __init__(self, config_path: str = "config.json"):
@@ -54,6 +63,10 @@ class MothController:
         self.monitor_thread = None
         self.lifecycle_thread = None
         self.breeding_thread = None
+        
+        # Event tracking for reports
+        self.events: list[MothEvent] = []
+        self.session_start_time = time.time()
         
         # Create directories - handle Windows paths in WSL
         breeding_dir = self.config["moth_settings"]["breeding_output_dir"]
@@ -93,11 +106,24 @@ class MothController:
         self.ollama_timeout = self.config["ollama"]["timeout"]
         self.ollama_prompt_template = self.config["ollama"]["prompt_template"]
         
+        # Debug mode settings
+        self.debug_mode = self.config.get("debug_mode", True)
+        
         # Perform startup self-check
         self._perform_startup_selfcheck()
         
         self.logger.info("Moth Controller initialized")
     
+    def _record_event(self, event_type: str, moth_id: str, details: dict = None):
+        """Record an event for reporting purposes"""
+        event = MothEvent(
+            timestamp=time.time(),
+            event_type=event_type,
+            moth_id=moth_id,
+            details=details or {}
+        )
+        self.events.append(event)
+        
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file"""
         try:
@@ -281,6 +307,42 @@ class MothController:
         
         return path
     
+    def _is_directory_from_today(self, directory_name: str) -> bool:
+        """Check if directory name indicates it's from today based on format: YYYYMMDD_HHMMSS"""
+        try:
+            # Extract date part from directory name (first 8 characters)
+            if len(directory_name) < 8:
+                return False
+            
+            date_part = directory_name[:8]
+            
+            # Check if it's all digits
+            if not date_part.isdigit():
+                return False
+            
+            # Parse the date
+            year = int(date_part[:4])
+            month = int(date_part[4:6])
+            day = int(date_part[6:8])
+            
+            # Get today's date
+            today = time.localtime()
+            today_year = today.tm_year
+            today_month = today.tm_mon
+            today_day = today.tm_mday
+            
+            # Compare dates
+            is_today = (year == today_year and month == today_month and day == today_day)
+            
+            if not is_today:
+                self.logger.debug(f"Directory {directory_name} is not from today ({today_year:04d}{today_month:02d}{today_day:02d}), skipping")
+            
+            return is_today
+            
+        except (ValueError, IndexError) as e:
+            self.logger.debug(f"Could not parse date from directory name {directory_name}: {e}")
+            return False  # If we can't parse the date, assume it's not from today
+    
     def _handle_udp_message(self, message: str):
         """Handle incoming UDP messages"""
         self.logger.info(f"Received UDP message: {message}")
@@ -322,6 +384,10 @@ class MothController:
         """Stop the moth controller"""
         self.is_running = False
         self.udp_client.stop()
+        
+        # Generate and save session report
+        self._save_session_report()
+        
         self.logger.info("Moth Controller stopped")
     
     def _monitor_directories(self):
@@ -341,12 +407,33 @@ class MothController:
         scan_interval = self.config["monitoring"]["scan_interval"]
         
         self.logger.info(f"Starting directory monitoring: {watch_dir}")
+        self.logger.info(f"Debug mode: {'enabled' if self.debug_mode else 'disabled'} - {'processing all directories' if self.debug_mode else 'only processing directories from today'}")
         
         while self.is_running:
             try:
                 if watch_dir.exists():
-                    current_dirs = {str(d) for d in watch_dir.iterdir() if d.is_dir()}
+                    # Get all directories
+                    all_dirs = {str(d) for d in watch_dir.iterdir() if d.is_dir()}
+                    
+                    # Filter directories based on debug mode
+                    if self.debug_mode:
+                        # In debug mode, process all directories
+                        current_dirs = all_dirs
+                        self.logger.debug("Debug mode: processing all directories")
+                    else:
+                        # In production mode, only process directories from today
+                        current_dirs = set()
+                        for dir_path in all_dirs:
+                            dir_name = os.path.basename(dir_path)
+                            if self._is_directory_from_today(dir_name):
+                                current_dirs.add(dir_path)
+                        
+                        self.logger.debug(f"Production mode: filtered {len(current_dirs)} directories from today out of {len(all_dirs)} total")
+                    
                     new_dirs = current_dirs - self.monitored_directories
+                    
+                    if new_dirs:
+                        self.logger.info(f"Found {len(new_dirs)} new directories to process")
                     
                     for i, new_dir in enumerate(new_dirs):
                         if i > 0:  # Add 1 second cooldown between generations (except for first one)
@@ -499,6 +586,12 @@ class MothController:
         
         if success:
             self.moths[moth_id] = moth_info
+            self._record_event("birth", moth_id, {
+                "texture_path": texture_path,
+                "prompt": prompt,
+                "directory": directory,
+                "source": "new_directory"
+            })
             self.logger.info(f"Created new moth: {moth_id} with texture: {texture_path}")
         else:
             self.logger.error(f"Failed to create moth: {moth_id}")
@@ -611,8 +704,19 @@ class MothController:
         success = self.udp_client.kill_moth(moth_id)
         
         if success:
-            self.moths[moth_id].is_alive = False
-            self.moths[moth_id].is_dead = True
+            current_time = time.time()
+            moth = self.moths[moth_id]
+            moth.is_alive = False
+            moth.is_dead = True
+            moth.death_time = current_time
+            moth.death_reason = reason
+            
+            age = current_time - moth.birth_time
+            self._record_event("death", moth_id, {
+                "reason": reason,
+                "age_seconds": age,
+                "breeding_count": moth.breeding_count
+            })
             self.logger.info(f"Killed moth {moth_id} (reason: {reason})")
         else:
             self.logger.error(f"Failed to kill moth: {moth_id}")
@@ -666,6 +770,12 @@ class MothController:
         if new_lifespan != old_lifespan:
             moth.current_lifespan = new_lifespan
             moth.lifespan_extensions += 1
+            self._record_event("lifespan_extension", moth_id, {
+                "reason": reason,
+                "old_lifespan": old_lifespan,
+                "new_lifespan": new_lifespan,
+                "extension_count": moth.lifespan_extensions
+            })
             self.logger.info(f"Extended lifespan for moth {moth_id[:8]} from {old_lifespan:.1f}s to {new_lifespan:.1f}s ({reason})")
     
     def mate_moths(self, moth_id1: str, moth_id2: str) -> bool:
@@ -702,6 +812,18 @@ class MothController:
             if moth2.mate_history is None:
                 moth2.mate_history = []
             moth2.mate_history.append(moth_id1)
+            
+            self._record_event("mating", moth_id1, {
+                "partner_id": moth_id2,
+                "moth1_breeding_count": moth1.breeding_count,
+                "moth2_breeding_count": moth2.breeding_count
+            })
+            self._record_event("mating", moth_id2, {
+                "partner_id": moth_id1,
+                "moth1_breeding_count": moth1.breeding_count,
+                "moth2_breeding_count": moth2.breeding_count
+            })
+            
             self.logger.info(f"Moths mated successfully: {moth_id1} + {moth_id2}")
             
             # Generate offspring texture using genetic algorithm
@@ -778,6 +900,9 @@ class MothController:
             current_lifespan=self.base_lifespan
         )
         
+        # Save offspring prompt file alongside texture
+        self._save_offspring_prompt_file(offspring_texture, offspring_prompt, parent1.prompt, parent2.prompt)
+        
         # Ensure offspring texture path is absolute
         abs_offspring_texture = self._ensure_absolute_path(offspring_texture)
         
@@ -789,11 +914,230 @@ class MothController:
         
         if success:
             self.moths[offspring_moth_id] = offspring_info
+            self._record_event("birth", offspring_moth_id, {
+                "parent1_id": parent1_id,
+                "parent2_id": parent2_id,
+                "texture_path": offspring_texture,
+                "prompt": offspring_prompt,
+                "source": "breeding"
+            })
             self.logger.info(f"Created offspring moth: {offspring_moth_id} from parents {parent1_id} + {parent2_id}")
             return offspring_moth_id
         else:
             self.logger.error(f"Failed to create offspring moth: {offspring_moth_id}")
             return None
+    
+    def _save_offspring_prompt_file(self, texture_path: str, offspring_prompt: str, parent1_prompt: str, parent2_prompt: str):
+        """Save offspring prompt and parent prompts to a text file alongside the texture"""
+        try:
+            # Get the directory and filename from texture path
+            texture_path_obj = Path(texture_path)
+            texture_dir = texture_path_obj.parent
+            texture_name = texture_path_obj.stem  # filename without extension
+            
+            # Create prompt filename (same as texture but with .txt extension)
+            prompt_filename = f"{texture_name}.txt"
+            prompt_path = texture_dir / prompt_filename
+            
+            # Prepare content with offspring prompt and parent prompts
+            content = f"""Offspring Prompt:
+{offspring_prompt}
+
+Parent 1 Prompt:
+{parent1_prompt}
+
+Parent 2 Prompt:
+{parent2_prompt}
+
+Generated at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}
+"""
+            
+            # Write to file with UTF-8 encoding
+            with open(prompt_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            self.logger.info(f"Saved offspring prompt file: {prompt_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Error saving offspring prompt file: {e}")
+    
+    def _generate_session_report(self) -> str:
+        """Generate a detailed session report in Markdown format"""
+        try:
+            session_end_time = time.time()
+            session_duration = session_end_time - self.session_start_time
+            
+            # Calculate statistics
+            total_moths = len(self.moths)
+            alive_moths = sum(1 for moth in self.moths.values() if moth.is_alive)
+            dead_moths = sum(1 for moth in self.moths.values() if moth.is_dead)
+            
+            # Count births and deaths from events
+            birth_events = [e for e in self.events if e.event_type == "birth"]
+            death_events = [e for e in self.events if e.event_type == "death"]
+            mating_events = [e for e in self.events if e.event_type == "mating"]
+            lifespan_extension_events = [e for e in self.events if e.event_type == "lifespan_extension"]
+            
+            # Count breeding vs new directory births
+            breeding_births = sum(1 for e in birth_events if e.details.get("source") == "breeding")
+            new_directory_births = sum(1 for e in birth_events if e.details.get("source") == "new_directory")
+            
+            # Calculate unique mating pairs (each mating creates 2 events)
+            unique_matings = len(mating_events) // 2
+            
+            # Generate Markdown report content
+            report_lines = []
+            report_lines.append("# 🦋 Moth Controller Session Report")
+            report_lines.append("")
+            report_lines.append(f"**生成时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+            report_lines.append("")
+            
+            # Session summary
+            report_lines.append("## 📊 会话摘要")
+            report_lines.append("")
+            report_lines.append(f"- **开始时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.session_start_time))}")
+            report_lines.append(f"- **结束时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session_end_time))}")
+            report_lines.append(f"- **运行时长**: {session_duration:.1f} 秒 ({session_duration/60:.1f} 分钟)")
+            report_lines.append("")
+            
+            # Population statistics
+            report_lines.append("## 🐛 蛾子统计")
+            report_lines.append("")
+            report_lines.append("| 统计项目 | 数量 |")
+            report_lines.append("|---------|------|")
+            report_lines.append(f"| 总蛾子数量 | {total_moths} |")
+            report_lines.append(f"| 存活蛾子 | {alive_moths} |")
+            report_lines.append(f"| 死亡蛾子 | {dead_moths} |")
+            report_lines.append(f"| 从新目录诞生 | {new_directory_births} |")
+            report_lines.append(f"| 通过繁殖诞生 | {breeding_births} |")
+            report_lines.append(f"| 总交配次数 | {unique_matings} |")
+            report_lines.append(f"| 寿命延长次数 | {len(lifespan_extension_events)} |")
+            report_lines.append("")
+            
+            # Death reasons
+            if death_events:
+                death_reasons = {}
+                for event in death_events:
+                    reason = event.details.get("reason", "unknown")
+                    death_reasons[reason] = death_reasons.get(reason, 0) + 1
+                
+                report_lines.append("## 💀 死亡原因统计")
+                report_lines.append("")
+                report_lines.append("| 死亡原因 | 数量 |")
+                report_lines.append("|---------|------|")
+                for reason, count in death_reasons.items():
+                    report_lines.append(f"| {reason} | {count} |")
+                report_lines.append("")
+            
+            # Timeline of events
+            report_lines.append("## 📅 事件时间线")
+            report_lines.append("")
+            
+            # Sort events by timestamp
+            sorted_events = sorted(self.events, key=lambda x: x.timestamp)
+            
+            for event in sorted_events:
+                event_time = time.strftime('%H:%M:%S', time.localtime(event.timestamp))
+                
+                # Get moth prompt instead of ID
+                moth_prompt = "未知"
+                if event.moth_id and event.moth_id in self.moths:
+                    moth_prompt = self.moths[event.moth_id].prompt or "无提示词"
+                elif event.details.get("prompt"):
+                    moth_prompt = event.details.get("prompt")
+                
+                if event.event_type == "birth":
+                    source = event.details.get("source", "unknown")
+                    if source == "breeding":
+                        # Get parent prompts
+                        parent1_id = event.details.get("parent1_id", "unknown")
+                        parent2_id = event.details.get("parent2_id", "unknown")
+                        
+                        parent1_prompt = "未知"
+                        parent2_prompt = "未知"
+                        
+                        if parent1_id in self.moths:
+                            parent1_prompt = self.moths[parent1_id].prompt or "无提示词"
+                        if parent2_id in self.moths:
+                            parent2_prompt = self.moths[parent2_id].prompt or "无提示词"
+                        
+                        report_lines.append(f"- **{event_time}** - 🐛 **蛾子诞生**: `{moth_prompt}` (父母: `{parent1_prompt}` + `{parent2_prompt}`)")
+                    else:
+                        report_lines.append(f"- **{event_time}** - 🐛 **蛾子诞生**: `{moth_prompt}` (新目录)")
+                
+                elif event.event_type == "death":
+                    reason = event.details.get("reason", "unknown")
+                    age = event.details.get("age_seconds", 0)
+                    breeding_count = event.details.get("breeding_count", 0)
+                    report_lines.append(f"- **{event_time}** - 💀 **蛾子死亡**: `{moth_prompt}` (原因: {reason}, 年龄: {age:.1f}s, 繁殖: {breeding_count}次)")
+                
+                elif event.event_type == "mating":
+                    partner_id = event.details.get("partner_id", "unknown")
+                    breeding_count = event.details.get("moth1_breeding_count", 0)
+                    
+                    # Get partner prompt
+                    partner_prompt = "未知"
+                    if partner_id in self.moths:
+                        partner_prompt = self.moths[partner_id].prompt or "无提示词"
+                    
+                    report_lines.append(f"- **{event_time}** - 💕 **蛾子交配**: `{moth_prompt}` + `{partner_prompt}` (第{breeding_count}次繁殖)")
+                
+                elif event.event_type == "lifespan_extension":
+                    reason = event.details.get("reason", "unknown")
+                    old_lifespan = event.details.get("old_lifespan", 0)
+                    new_lifespan = event.details.get("new_lifespan", 0)
+                    report_lines.append(f"- **{event_time}** - ⏰ **寿命延长**: `{moth_prompt}` ({old_lifespan:.1f}s → {new_lifespan:.1f}s, 原因: {reason})")
+            
+            report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+            report_lines.append("*由 Moth Controller 自动生成*")
+            
+            return "\n".join(report_lines)
+            
+        except Exception as e:
+            self.logger.error(f"Error generating session report: {e}")
+            return f"# Error\n\nError generating report: {e}"
+    
+    def _save_session_report(self):
+        """Save session report to file"""
+        try:
+            report_content = self._generate_session_report()
+            
+            # Create report filename with timestamp
+            timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+            report_filename = f"moth_session_report_{timestamp}.md"
+            report_path = os.path.join(os.getcwd(), report_filename)
+            
+            # Save report
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(report_content)
+            
+            self.logger.info(f"Session report saved to: {report_path}")
+            print(f"\n📊 Session report saved to: {report_filename}")
+            
+            # Also print summary to console
+            print("\n" + "="*50)
+            print("SESSION SUMMARY")
+            print("="*50)
+            
+            total_moths = len(self.moths)
+            alive_moths = sum(1 for moth in self.moths.values() if moth.is_alive)
+            dead_moths = sum(1 for moth in self.moths.values() if moth.is_dead)
+            birth_events = [e for e in self.events if e.event_type == "birth"]
+            mating_events = [e for e in self.events if e.event_type == "mating"]
+            breeding_births = sum(1 for e in birth_events if e.details.get("source") == "breeding")
+            new_directory_births = sum(1 for e in birth_events if e.details.get("source") == "new_directory")
+            unique_matings = len(mating_events) // 2
+            
+            print(f"总蛾子数量: {total_moths}")
+            print(f"存活: {alive_moths}, 死亡: {dead_moths}")
+            print(f"新诞生: {new_directory_births}, 繁殖诞生: {breeding_births}")
+            print(f"总交配次数: {unique_matings}")
+            print("="*50)
+            
+        except Exception as e:
+            self.logger.error(f"Error saving session report: {e}")
     
     def get_moth_status(self) -> Dict:
         """Get current moth status"""

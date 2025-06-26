@@ -40,7 +40,7 @@
                    "host":  "http://192.168.50.111:11434",
                    "model":  "deepseek-r1:1.5b",
                    "timeout":  30,
-                   "prompt_template":  "帮我融合两个句子成一句话,要求语义通顺,不要使用关联词关联两句话,而是将他们的内容混杂在一�? 只回复我句子内容不带其他任何东西.句子1: {prompt1} 句子2: {prompt2}"
+                   "prompt_template":  "帮我融合两个句子成一句话,要求语义通顺,不要使用关联词关联两句话,而是将他们的内容混杂在一�? 只回复我句子内容不带其他任何东西.句子1: {prompt1} 句子2: {prompt2}"
                },
     "logging":  {
                     "level":  "INFO",
@@ -48,5 +48,6 @@
                 },
     "unity":  {
                   "config_path":  "E:\\GitHub\\Moth\\Build\\Moth_Data\\StreamingAssets\\udp_config.json"
-              }
+              },
+    "debug_mode": true
 }
