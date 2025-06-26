@@ -7,6 +7,7 @@ import threading
 import requests
 import random
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, Set
 from dataclasses import dataclass
@@ -54,8 +55,16 @@ class MothController:
         self.lifecycle_thread = None
         self.breeding_thread = None
         
-        # Create directories
-        self.breeding_output_dir = self.config["moth_settings"]["breeding_output_dir"]
+        # Create directories - handle Windows paths in WSL
+        breeding_dir = self.config["moth_settings"]["breeding_output_dir"]
+        if self._is_windows_path(breeding_dir):
+            # Convert Windows path to WSL path
+            self.breeding_output_dir = self._windows_to_wsl_path(breeding_dir)
+        elif not os.path.isabs(breeding_dir):
+            # Convert relative path to absolute path
+            self.breeding_output_dir = os.path.abspath(breeding_dir)
+        else:
+            self.breeding_output_dir = breeding_dir
         os.makedirs(self.breeding_output_dir, exist_ok=True)
         
         # Population control settings
@@ -205,12 +214,71 @@ class MothController:
         cleaned = ' '.join(cleaned.split())
         return cleaned.strip()
     
+    def _is_wsl_environment(self) -> bool:
+        """Check if running in WSL environment"""
+        try:
+            # Check if /proc/version contains 'microsoft' (WSL signature)
+            with open('/proc/version', 'r') as f:
+                version_info = f.read().lower()
+                return 'microsoft' in version_info or 'wsl' in version_info
+        except:
+            return False
+    
+    def _is_windows_path(self, path: str) -> bool:
+        """Check if path is in Windows format (e.g., C:\path or D:\path)"""
+        return bool(re.match(r'^[A-Za-z]:[/\\]', path))
+    
+    def _windows_to_wsl_path(self, windows_path: str) -> str:
+        """Convert Windows path to WSL path"""
+        if not self._is_wsl_environment():
+            return windows_path
+        
+        try:
+            # Use wslpath command to convert Windows path to WSL path
+            result = subprocess.run(['wslpath', windows_path], 
+                                  capture_output=True, text=True, check=True)
+            wsl_path = result.stdout.strip()
+            self.logger.info(f"Converted Windows path to WSL: {windows_path} -> {wsl_path}")
+            return wsl_path
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"Failed to convert Windows path {windows_path}: {e}")
+            return windows_path
+        except FileNotFoundError:
+            self.logger.warning("wslpath command not found, using original path")
+            return windows_path
+    
+    def _wsl_to_windows_path(self, wsl_path: str) -> str:
+        """Convert WSL path to Windows path for UDP commands"""
+        if not self._is_wsl_environment():
+            return wsl_path
+        
+        try:
+            # Use wslpath with -w flag to convert WSL path to Windows path
+            result = subprocess.run(['wslpath', '-w', wsl_path], 
+                                  capture_output=True, text=True, check=True)
+            windows_path = result.stdout.strip()
+            self.logger.info(f"Converted WSL path to Windows: {wsl_path} -> {windows_path}")
+            return windows_path
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"Failed to convert WSL path {wsl_path}: {e}")
+            return wsl_path
+        except FileNotFoundError:
+            self.logger.warning("wslpath command not found, using original path")
+            return wsl_path
+    
     def _ensure_absolute_path(self, path: str) -> str:
-        """Convert relative path to absolute path if needed"""
+        """Convert relative path to absolute path if needed, with WSL path conversion"""
+        # First convert to absolute path if needed
         if not os.path.isabs(path):
             absolute_path = os.path.abspath(path)
             self.logger.info(f"Converted relative path to absolute: {path} -> {absolute_path}")
-            return absolute_path
+            path = absolute_path
+        
+        # If in WSL and path looks like a Windows path, convert it
+        if self._is_wsl_environment() and (path.startswith('C:') or path.startswith('D:') or 
+                                          path.startswith('E:') or '\\' in path):
+            path = self._windows_to_wsl_path(path)
+        
         return path
     
     def _handle_udp_message(self, message: str):
@@ -258,10 +326,18 @@ class MothController:
     
     def _monitor_directories(self):
         """Monitor directories for new subdirectories"""
-        watch_dir = Path(self.config["monitoring"]["watch_directory"])
-        if not watch_dir.is_absolute():
-            watch_dir = watch_dir.resolve()
-            self.logger.info(f"Converted relative watch_directory to absolute path: {watch_dir}")
+        # Get the watch directory path from config
+        watch_dir_str = self.config["monitoring"]["watch_directory"]
+        
+        # Check if it's a Windows path format (e.g., C:\path or D:\path)
+        if self._is_windows_path(watch_dir_str):
+            # Convert Windows path to WSL path
+            watch_dir_str = self._windows_to_wsl_path(watch_dir_str)
+        elif not os.path.isabs(watch_dir_str):
+            # Convert relative path to absolute path
+            watch_dir_str = os.path.abspath(watch_dir_str)
+        
+        watch_dir = Path(watch_dir_str)
         scan_interval = self.config["monitoring"]["scan_interval"]
         
         self.logger.info(f"Starting directory monitoring: {watch_dir}")
@@ -307,8 +383,23 @@ class MothController:
         """Read prompt text from prompt.txt file"""
         try:
             if os.path.exists(prompt_path):
-                with open(prompt_path, 'r') as f:
-                    prompt_text = f.read().strip()
+                # Try different encodings to handle various file formats
+                encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1']
+                prompt_text = ""
+                
+                for encoding in encodings:
+                    try:
+                        with open(prompt_path, 'r', encoding=encoding) as f:
+                            prompt_text = f.read().strip()
+                        self.logger.debug(f"Successfully read prompt file with {encoding} encoding")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if not prompt_text:
+                    self.logger.warning(f"Could not decode prompt file with any supported encoding: {prompt_path}")
+                    return ""
+                
                 # Clean prompt content before returning
                 cleaned_prompt = self._clean_prompt_content(prompt_text)
                 self.logger.info(f"Read prompt from {prompt_path}: {cleaned_prompt[:50]}...")
@@ -399,9 +490,12 @@ class MothController:
         # Ensure texture path is absolute
         abs_texture_path = self._ensure_absolute_path(texture_path)
         
+        # Convert path to Windows format for UDP command if in WSL
+        udp_texture_path = self._wsl_to_windows_path(abs_texture_path)
+        
         # Send generation command with prompt
         print(f"Creating new moth: {moth_id} with texture: {abs_texture_path}")
-        success = self.udp_client.generate_new_moth(moth_id, abs_texture_path, prompt)
+        success = self.udp_client.generate_new_moth(moth_id, udp_texture_path, prompt)
         
         if success:
             self.moths[moth_id] = moth_info
@@ -687,8 +781,11 @@ class MothController:
         # Ensure offspring texture path is absolute
         abs_offspring_texture = self._ensure_absolute_path(offspring_texture)
         
+        # Convert path to Windows format for UDP command if in WSL
+        udp_offspring_texture = self._wsl_to_windows_path(abs_offspring_texture)
+        
         # Send birth command (for offspring moths) with prompt
-        success = self.udp_client.birth_moth(offspring_moth_id, abs_offspring_texture, offspring_prompt)
+        success = self.udp_client.birth_moth(offspring_moth_id, udp_offspring_texture, offspring_prompt)
         
         if success:
             self.moths[offspring_moth_id] = offspring_info
