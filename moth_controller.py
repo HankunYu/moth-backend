@@ -39,6 +39,8 @@ class MothInfo:
     lifespan_extensions: int = 0    # How many times lifespan was extended
     death_time: float = None  # Time when moth died
     death_reason: str = None  # Reason for death
+    is_breeding: bool = False  # Whether moth is currently breeding
+    breeding_start_time: float = None  # When breeding started
 
 class MothController:
     def __init__(self, config_path: str = "config.json"):
@@ -612,7 +614,7 @@ class MothController:
                 # Check for moths that should die based on their individual lifespans
                 moths_to_kill = []
                 for moth_id, moth_info in self.moths.items():
-                    if moth_info.is_alive:
+                    if moth_info.is_alive and not moth_info.is_breeding:  # Skip breeding moths
                         age = current_time - moth_info.birth_time
                         if age > moth_info.current_lifespan:
                             moths_to_kill.append(moth_id)
@@ -673,11 +675,8 @@ class MothController:
             if not moth.is_alive:
                 continue
                 
-            # Check if moth has enough remaining lifespan
-            age = current_time - moth.birth_time
-            remaining_lifespan = moth.current_lifespan - age
-            
-            if remaining_lifespan < self.min_remaining_lifespan_for_breeding:
+            # Skip if moth is currently breeding
+            if moth.is_breeding:
                 continue
             
             # Check breeding cooldown
@@ -799,6 +798,13 @@ class MothController:
         
         if success:
             current_time = time.time()
+            
+            # Set breeding state - this pauses their life countdown
+            moth1.is_breeding = True
+            moth1.breeding_start_time = current_time
+            moth2.is_breeding = True
+            moth2.breeding_start_time = current_time
+            
             moth1.has_mated = True
             moth1.last_mating_time = current_time
             moth1.breeding_count += 1
@@ -838,10 +844,35 @@ class MothController:
                     self.logger.error("Failed to create offspring moth")
             else:
                 self.logger.error("Failed to generate offspring texture")
+            
+            # End breeding state - resume life countdown
+            self._end_breeding_state(moth_id1, moth_id2)
         else:
             self.logger.error(f"Failed to mate moths: {moth_id1}, {moth_id2}")
         
         return success
+    
+    def _end_breeding_state(self, moth_id1: str, moth_id2: str):
+        """End breeding state and adjust lifespans to account for breeding time"""
+        if moth_id1 in self.moths and moth_id2 in self.moths:
+            current_time = time.time()
+            moth1 = self.moths[moth_id1]
+            moth2 = self.moths[moth_id2]
+            
+            # Calculate breeding duration and extend lifespan accordingly
+            if moth1.is_breeding and moth1.breeding_start_time:
+                breeding_duration = current_time - moth1.breeding_start_time
+                moth1.current_lifespan += breeding_duration
+                moth1.is_breeding = False
+                moth1.breeding_start_time = None
+                self.logger.info(f"Moth {moth_id1[:8]} finished breeding, lifespan extended by {breeding_duration:.1f}s")
+            
+            if moth2.is_breeding and moth2.breeding_start_time:
+                breeding_duration = current_time - moth2.breeding_start_time
+                moth2.current_lifespan += breeding_duration
+                moth2.is_breeding = False
+                moth2.breeding_start_time = None
+                self.logger.info(f"Moth {moth_id2[:8]} finished breeding, lifespan extended by {breeding_duration:.1f}s")
     
     def _generate_offspring_texture(self, parent1_texture: str, parent2_texture: str) -> str:
         """Generate new texture by blending two parent textures using genetic algorithm"""
@@ -866,7 +897,7 @@ class MothController:
             best_mask, best_blend = blender.run()
             
             # Resize and save the offspring texture
-            offspring_texture = cv2.resize(best_blend, (512, 512))
+            offspring_texture = cv2.resize(best_blend, (400, 400))
             cv2.imwrite(offspring_path, offspring_texture)
             
             self.logger.info(f"Generated offspring texture: {offspring_path}")
@@ -1183,7 +1214,9 @@ Generated at: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}
                 "breeding_count": moth_info.breeding_count,
                 "current_lifespan": moth_info.current_lifespan,
                 "remaining_lifespan": round(remaining_lifespan, 2),
-                "lifespan_extensions": moth_info.lifespan_extensions
+                "lifespan_extensions": moth_info.lifespan_extensions,
+                "is_breeding": moth_info.is_breeding,
+                "breeding_start_time": moth_info.breeding_start_time
             }
         return result
 
