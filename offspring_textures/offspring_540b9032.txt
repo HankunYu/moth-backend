@@ -1,0 +1,10 @@
+Offspring Prompt:
+Offspring of: [奇亚籽可以治疗糖尿病] + [森林里长出了爆米花]
+
+Parent 1 Prompt:
+奇亚籽可以治疗糖尿病
+
+Parent 2 Prompt:
+森林里长出了爆米花
+
+Generated at: 2025-06-27 12:43:51
